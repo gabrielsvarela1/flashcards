@@ -67,6 +67,37 @@ export async function signUp(
   };
 }
 
+export async function requestPasswordReset(
+  _prev: AuthState,
+  formData: FormData,
+): Promise<AuthState> {
+  const email = String(formData.get("email") ?? "").trim();
+  if (!email) return { error: "Indica o teu email." };
+
+  const supabase = await createClient();
+  const { error } = await supabase.auth.resetPasswordForEmail(email, {
+    redirectTo: `${await getOrigin()}/auth/recovery`,
+  });
+  // Só os limites de envio são mostrados: dizer que o email não existe
+  // revelava quem tem conta.
+  if (error?.code === "over_email_send_rate_limit" || error?.code === "over_request_rate_limit") {
+    return { error: translate(error.code) };
+  }
+
+  return {
+    message: `Se existir uma conta com ${email}, enviámos um link para definires uma nova palavra-passe.`,
+  };
+}
+
+export async function signInWithGoogle() {
+  const supabase = await createClient();
+  const { data, error } = await supabase.auth.signInWithOAuth({
+    provider: "google",
+    options: { redirectTo: `${await getOrigin()}/auth/confirm` },
+  });
+  redirect(error || !data.url ? "/login?error=google" : data.url);
+}
+
 async function getOrigin() {
   const h = await headers();
   const origin = h.get("origin");

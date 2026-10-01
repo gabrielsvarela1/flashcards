@@ -1,4 +1,5 @@
 import type { Metadata } from "next";
+import { isGoogleLoginEnabled } from "@/lib/supabase/settings";
 import { AuthForm } from "./auth-form";
 
 export const metadata: Metadata = { title: "Entrar · Flashcards" };
@@ -6,10 +7,13 @@ export const metadata: Metadata = { title: "Entrar · Flashcards" };
 const errors: Record<string, string> = {
   confirm:
     "Não foi possível iniciar sessão a partir do link. Se o email já ficou confirmado, entra com a tua palavra-passe.",
+  recovery:
+    "O link de recuperação expirou ou foi aberto noutro navegador. Pede um novo link e abre-o neste navegador.",
+  google: "Não foi possível entrar com o Google. Tenta novamente.",
 };
 
 export default async function LoginPage({ searchParams }: PageProps<"/login">) {
-  const { next, error } = await searchParams;
+  const [{ next, error }, google] = await Promise.all([searchParams, isGoogleLoginEnabled()]);
 
   return (
     <main className="flex flex-1 flex-col items-center justify-center px-4 py-10">
@@ -23,6 +27,7 @@ export default async function LoginPage({ searchParams }: PageProps<"/login">) {
         <AuthForm
           next={typeof next === "string" ? next : undefined}
           initialError={typeof error === "string" ? errors[error] : undefined}
+          google={google}
         />
       </div>
     </main>
