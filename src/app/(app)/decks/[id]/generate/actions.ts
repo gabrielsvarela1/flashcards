@@ -1,22 +1,35 @@
 "use server";
 
-import { revalidatePath } from "next/cache";
-import { redirect } from "next/navigation";
 import { requireUser } from "@/lib/auth";
-import { parseSides, type CardSides } from "@/lib/cards";
-import { generateCardsFromPdf, GenerationError } from "@/lib/gemini";
+import { consumeAiQuota } from "@/lib/ai-usage";
+import { type CardSides } from "@/lib/cards";
+import {
+  generateCardsFromImages,
+  generateCardsFromPdf,
+  generateCardsFromText,
+  GenerationError,
+  type ImageInput,
+} from "@/lib/gemini";
+import {
+  GENERATE_COUNTS,
+  IMAGE_TYPES,
+  MAX_IMAGE_BYTES,
+  MAX_IMAGES,
+  MAX_TEXT_CHARS,
+  MIN_TEXT_CHARS,
+} from "@/lib/limits";
+import { errorDetail, logError } from "@/lib/log";
 import { MAX_PDF_BYTES, MAX_PDF_LABEL, PDF_BUCKET } from "@/lib/pdf";
 
-const COUNTS = [10, 20, 30];
-const MAX_SAVE = 100;
-
 export type GenerateResult = { error?: string; cards?: CardSides[] };
+
+type Supabase = Awaited<ReturnType<typeof requireUser>>["supabase"];
 
 /**
  * Gera cards a partir de um PDF que o browser já enviou para o Supabase
  * Storage (pdfs/<user_id>/...). O ficheiro é sempre apagado no fim.
  */
-export async function generateCards(deckId: string, path: string, count: number): Promise<GenerateResult> {
+export async function generateFromPdf(deckId: string, path: string, count: number): Promise<GenerateResult> {
   const { supabase, userId } = await requireUser();
   const storage = supabase.storage.from(PDF_BUCKET);
 
@@ -25,10 +38,8 @@ export async function generateCards(deckId: string, path: string, count: number)
     if (typeof path !== "string" || !path.startsWith(`${userId}/`) || path.includes("..")) {
       return { error: "Ficheiro inválido." };
     }
-    if (!COUNTS.includes(count)) return { error: "Quantidade inválida." };
-
-    const { data: deck } = await supabase.from("decks").select("id").eq("id", deckId).maybeSingle();
-    if (!deck) return { error: "Deck não encontrado." };
+    const invalid = await checkRequest(supabase, deckId, count);
+    if (invalid) return invalid;
 
     const { data: blob, error } = await storage.download(path);
     if (error || !blob) return { error: "Não foi possível ler o PDF enviado. Tenta novamente." };
@@ -40,33 +51,67 @@ export async function generateCards(deckId: string, path: string, count: number)
       return { error: "O ficheiro não é um PDF válido." };
     }
 
-    return { cards: await generateCardsFromPdf(bytes, count) };
-  } catch (err) {
-    if (err instanceof GenerationError) return { error: err.message };
-    console.error(err);
-    return { error: "Algo correu mal ao gerar os cards." };
+    return await generate(supabase, deckId, () => generateCardsFromPdf(bytes, count));
   } finally {
     const { error } = await storage.remove([path]);
     if (error) console.error("Falha ao apagar PDF do Storage", error);
   }
 }
 
-export async function saveGeneratedCards(deckId: string, cards: CardSides[]): Promise<{ error?: string }> {
-  if (!Array.isArray(cards) || cards.length === 0) return { error: "Escolhe pelo menos um card." };
-  if (cards.length > MAX_SAVE) return { error: `Podes guardar no máximo ${MAX_SAVE} cards de cada vez.` };
-
-  const rows: (CardSides & { deck_id: string })[] = [];
-  for (const [i, c] of cards.entries()) {
-    const sides = parseSides(c?.front, c?.back);
-    if ("error" in sides) return { error: `Card ${i + 1}: ${sides.error}` };
-    rows.push({ deck_id: deckId, ...sides });
-  }
-
+export async function generateFromText(deckId: string, text: string, count: number): Promise<GenerateResult> {
   const { supabase } = await requireUser();
-  // O RLS rejeita a inserção se o deck não for do utilizador.
-  const { error } = await supabase.from("cards").insert(rows);
-  if (error) return { error: "Não foi possível guardar os cards." };
 
-  revalidatePath(`/decks/${deckId}`);
-  redirect(`/decks/${deckId}`);
+  const material = typeof text === "string" ? text.trim() : "";
+  if (material.length < MIN_TEXT_CHARS) return { error: `Cola pelo menos ${MIN_TEXT_CHARS} caracteres de texto.` };
+  if (material.length > MAX_TEXT_CHARS) {
+    return { error: `O texto pode ter no máximo ${MAX_TEXT_CHARS.toLocaleString("pt-PT")} caracteres.` };
+  }
+  const invalid = await checkRequest(supabase, deckId, count);
+  if (invalid) return invalid;
+
+  return generate(supabase, deckId, () => generateCardsFromText(material, count));
+}
+
+/** As fotos chegam já reduzidas pelo browser, no campo "images" do FormData. */
+export async function generateFromImages(deckId: string, count: number, formData: FormData): Promise<GenerateResult> {
+  const { supabase } = await requireUser();
+
+  const files = formData.getAll("images").filter((f): f is File => f instanceof File && f.size > 0);
+  if (files.length === 0) return { error: "Escolhe pelo menos uma foto." };
+  if (files.length > MAX_IMAGES) return { error: `Podes enviar no máximo ${MAX_IMAGES} fotos de cada vez.` };
+  if (files.some((f) => !IMAGE_TYPES.includes(f.type) || f.size > MAX_IMAGE_BYTES)) {
+    return { error: "Uma das fotos não é válida. Usa imagens JPEG, PNG ou WebP." };
+  }
+  const invalid = await checkRequest(supabase, deckId, count);
+  if (invalid) return invalid;
+
+  const images: ImageInput[] = await Promise.all(
+    files.map(async (f) => ({ bytes: new Uint8Array(await f.arrayBuffer()), mimeType: f.type })),
+  );
+  return generate(supabase, deckId, () => generateCardsFromImages(images, count));
+}
+
+async function checkRequest(supabase: Supabase, deckId: string, count: number): Promise<GenerateResult | null> {
+  if (!GENERATE_COUNTS.includes(count)) return { error: "Quantidade inválida." };
+  const { data: deck } = await supabase.from("decks").select("id").eq("id", deckId).maybeSingle();
+  if (!deck) return { error: "Deck não encontrado." };
+  return null;
+}
+
+async function generate(supabase: Supabase, deckId: string, run: () => Promise<CardSides[]>): Promise<GenerateResult> {
+  const quota = await consumeAiQuota(supabase, "generate");
+  if (quota.error) return { error: quota.error };
+
+  try {
+    return { cards: await run() };
+  } catch (err) {
+    const known = err instanceof GenerationError;
+    await logError(supabase, {
+      source: "server",
+      message: known ? err.message : "Falha inesperada ao gerar cards",
+      detail: known ? undefined : errorDetail(err),
+      path: `/decks/${deckId}/generate`,
+    });
+    return { error: known ? err.message : "Algo correu mal ao gerar os cards." };
+  }
 }

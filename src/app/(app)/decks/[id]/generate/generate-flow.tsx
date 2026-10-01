@@ -1,48 +1,91 @@
 "use client";
 
-import { useState, useTransition } from "react";
+import { useState } from "react";
 import { Button } from "@/components/ui/button";
-import { CARD_SIDE_MAX, type CardSides } from "@/lib/cards";
+import { shrinkImage } from "@/lib/image";
+import { MAX_IMAGES, MAX_TEXT_CHARS, MIN_TEXT_CHARS } from "@/lib/limits";
 import { MAX_PDF_BYTES, MAX_PDF_LABEL, PDF_BUCKET } from "@/lib/pdf";
 import { createClient } from "@/lib/supabase/client";
-import { generateCards, saveGeneratedCards } from "./actions";
+import { DraftList, toDrafts, type Draft } from "../draft-list";
+import { generateFromImages, generateFromPdf, generateFromText, type GenerateResult } from "./actions";
 
-type Draft = CardSides & { keep: boolean };
+type Source = "pdf" | "text" | "images";
+type Step = "idle" | "uploading" | "generating";
+
+const SOURCES: { id: Source; label: string }[] = [
+  { id: "pdf", label: "PDF" },
+  { id: "text", label: "Texto" },
+  { id: "images", label: "Fotos" },
+];
+
+const dropzone =
+  "flex cursor-pointer flex-col items-center justify-center gap-2 rounded-2xl border-2 border-dashed border-neutral-300 bg-white p-8 text-center transition-colors hover:border-indigo-400 has-[:focus-visible]:border-indigo-500 dark:border-neutral-700 dark:bg-neutral-900";
+const fileInput =
+  "mt-2 w-full max-w-xs text-sm file:mr-3 file:rounded-lg file:border-0 file:bg-indigo-50 file:px-3 file:py-2 file:text-indigo-700 dark:file:bg-indigo-950 dark:file:text-indigo-300";
 
 export function GenerateFlow({ deckId, userId }: { deckId: string; userId: string }) {
+  const [source, setSource] = useState<Source>("pdf");
   const [drafts, setDrafts] = useState<Draft[] | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [step, setStep] = useState<"idle" | "uploading" | "generating">("idle");
+  const [step, setStep] = useState<Step>("idle");
+  const [textLength, setTextLength] = useState(0);
   const busy = step !== "idle";
+
+  async function fromPdf(form: FormData, count: number): Promise<GenerateResult> {
+    const file = form.get("pdf");
+    if (!(file instanceof File) || file.size === 0) return { error: "Escolhe um ficheiro PDF." };
+    if (file.type && file.type !== "application/pdf") return { error: "O ficheiro tem de ser um PDF." };
+    if (file.size > MAX_PDF_BYTES) return { error: `O PDF pode ter no máximo ${MAX_PDF_LABEL}.` };
+
+    // Envio direto do browser para o Supabase Storage: não passa pela
+    // Vercel, que limita os pedidos a 4,5 MB.
+    setStep("uploading");
+    const path = `${userId}/${crypto.randomUUID()}.pdf`;
+    const { error: uploadError } = await createClient()
+      .storage.from(PDF_BUCKET)
+      .upload(path, file, { contentType: "application/pdf" });
+    if (uploadError) return { error: "Não foi possível enviar o PDF. Verifica a ligação e tenta novamente." };
+
+    setStep("generating");
+    return generateFromPdf(deckId, path, count);
+  }
+
+  async function fromText(form: FormData, count: number): Promise<GenerateResult> {
+    const text = String(form.get("text") ?? "").trim();
+    if (text.length < MIN_TEXT_CHARS) return { error: `Cola pelo menos ${MIN_TEXT_CHARS} caracteres de texto.` };
+
+    setStep("generating");
+    return generateFromText(deckId, text, count);
+  }
+
+  async function fromImages(form: FormData, count: number): Promise<GenerateResult> {
+    const files = form.getAll("images").filter((f): f is File => f instanceof File && f.size > 0);
+    if (files.length === 0) return { error: "Escolhe pelo menos uma foto." };
+    if (files.length > MAX_IMAGES) return { error: `Podes enviar no máximo ${MAX_IMAGES} fotos de cada vez.` };
+
+    setStep("uploading");
+    const payload = new FormData();
+    try {
+      for (const file of files) payload.append("images", await shrinkImage(file));
+    } catch {
+      return { error: "Não foi possível ler uma das fotos. Usa imagens JPEG ou PNG." };
+    }
+
+    setStep("generating");
+    return generateFromImages(deckId, count, payload);
+  }
 
   async function onSubmit(e: React.FormEvent<HTMLFormElement>) {
     e.preventDefault();
     setError(null);
     const form = new FormData(e.currentTarget);
-    const file = form.get("pdf");
     const count = Number(form.get("count"));
 
-    if (!(file instanceof File) || file.size === 0) return setError("Escolhe um ficheiro PDF.");
-    if (file.type && file.type !== "application/pdf") return setError("O ficheiro tem de ser um PDF.");
-    if (file.size > MAX_PDF_BYTES) return setError(`O PDF pode ter no máximo ${MAX_PDF_LABEL}.`);
-
     try {
-      // Envio direto do browser para o Supabase Storage: não passa pela
-      // Vercel, que limita os pedidos a 4,5 MB.
-      setStep("uploading");
-      const path = `${userId}/${crypto.randomUUID()}.pdf`;
-      const { error: uploadError } = await createClient()
-        .storage.from(PDF_BUCKET)
-        .upload(path, file, { contentType: "application/pdf" });
-      if (uploadError) {
-        setError("Não foi possível enviar o PDF. Verifica a ligação e tenta novamente.");
-        return;
-      }
-
-      setStep("generating");
-      const result = await generateCards(deckId, path, count);
+      const run = source === "pdf" ? fromPdf : source === "text" ? fromText : fromImages;
+      const result = await run(form, count);
       if (result.error) setError(result.error);
-      if (result.cards) setDrafts(result.cards.map((c) => ({ ...c, keep: true })));
+      if (result.cards) setDrafts(toDrafts(result.cards));
     } catch {
       setError("Algo correu mal. Tenta novamente.");
     } finally {
@@ -51,26 +94,84 @@ export function GenerateFlow({ deckId, userId }: { deckId: string; userId: strin
   }
 
   if (drafts) {
-    return <ReviewDrafts deckId={deckId} drafts={drafts} setDrafts={setDrafts} onRestart={() => setDrafts(null)} />;
+    return (
+      <DraftList
+        deckId={deckId}
+        drafts={drafts}
+        setDrafts={setDrafts}
+        restartLabel="Gerar outra vez"
+        onRestart={() => setDrafts(null)}
+      />
+    );
   }
 
   return (
     <form onSubmit={onSubmit} className="flex flex-col gap-4">
-      <label className="flex cursor-pointer flex-col items-center justify-center gap-2 rounded-2xl border-2 border-dashed border-neutral-300 bg-white p-8 text-center transition-colors hover:border-indigo-400 has-[:focus-visible]:border-indigo-500 dark:border-neutral-700 dark:bg-neutral-900">
-        <span className="text-3xl" aria-hidden>
-          📄
-        </span>
-        <span className="font-medium">Escolher PDF</span>
-        <span className="text-sm text-neutral-500">Até {MAX_PDF_LABEL}</span>
-        <input
-          type="file"
-          name="pdf"
-          accept="application/pdf,.pdf"
-          required
-          disabled={busy}
-          className="mt-2 w-full max-w-xs text-sm file:mr-3 file:rounded-lg file:border-0 file:bg-indigo-50 file:px-3 file:py-2 file:text-indigo-700 dark:file:bg-indigo-950 dark:file:text-indigo-300"
-        />
-      </label>
+      <div role="tablist" aria-label="Origem do conteúdo" className="grid grid-cols-3 rounded-xl bg-neutral-100 p-1 dark:bg-neutral-800">
+        {SOURCES.map((s) => (
+          <button
+            key={s.id}
+            role="tab"
+            type="button"
+            aria-selected={source === s.id}
+            disabled={busy}
+            onClick={() => {
+              setSource(s.id);
+              setError(null);
+            }}
+            className={`min-h-10 rounded-lg text-sm font-medium transition-colors ${
+              source === s.id
+                ? "bg-white text-neutral-900 shadow-sm dark:bg-neutral-950 dark:text-neutral-100"
+                : "text-neutral-500"
+            }`}
+          >
+            {s.label}
+          </button>
+        ))}
+      </div>
+
+      {source === "pdf" && (
+        <label className={dropzone}>
+          <span className="text-3xl" aria-hidden>
+            📄
+          </span>
+          <span className="font-medium">Escolher PDF</span>
+          <span className="text-sm text-neutral-500">Até {MAX_PDF_LABEL}</span>
+          <input type="file" name="pdf" accept="application/pdf,.pdf" required disabled={busy} className={fileInput} />
+        </label>
+      )}
+
+      {source === "text" && (
+        <label htmlFor="generate-text" className="flex flex-col gap-1.5">
+          <span className="text-sm font-medium text-neutral-700 dark:text-neutral-300">Texto para estudar</span>
+          <textarea
+            id="generate-text"
+            name="text"
+            required
+            rows={8}
+            minLength={MIN_TEXT_CHARS}
+            maxLength={MAX_TEXT_CHARS}
+            disabled={busy}
+            placeholder="Cola aqui os teus apontamentos, um resumo ou um capítulo."
+            onChange={(e) => setTextLength(e.target.value.trim().length)}
+            className="min-h-40 resize-y rounded-xl border border-neutral-300 bg-white px-3 py-2.5 text-base outline-none placeholder:text-neutral-400 focus:border-indigo-500 focus:ring-2 focus:ring-indigo-500/30 dark:border-neutral-700 dark:bg-neutral-900"
+          />
+          <span className="text-xs text-neutral-500">
+            {textLength.toLocaleString("pt-PT")} / {MAX_TEXT_CHARS.toLocaleString("pt-PT")} caracteres
+          </span>
+        </label>
+      )}
+
+      {source === "images" && (
+        <label className={dropzone}>
+          <span className="text-3xl" aria-hidden>
+            📷
+          </span>
+          <span className="font-medium">Escolher fotos</span>
+          <span className="text-sm text-neutral-500">Até {MAX_IMAGES} fotos de apontamentos ou páginas</span>
+          <input type="file" name="images" accept="image/*" multiple required disabled={busy} className={fileInput} />
+        </label>
+      )}
 
       <label className="flex items-center justify-between gap-4">
         <span className="text-sm font-medium text-neutral-700 dark:text-neutral-300">Quantos cards?</span>
@@ -93,7 +194,7 @@ export function GenerateFlow({ deckId, userId }: { deckId: string; userId: strin
       )}
 
       <Button type="submit" disabled={busy} className="min-h-14 text-base">
-        {step === "uploading" ? "A enviar o PDF…" : step === "generating" ? "A gerar cards…" : "Gerar cards"}
+        {step === "uploading" ? "A preparar o envio…" : step === "generating" ? "A gerar cards…" : "Gerar cards"}
       </Button>
       {busy && (
         <p className="text-center text-sm text-neutral-500" role="status">
@@ -101,109 +202,9 @@ export function GenerateFlow({ deckId, userId }: { deckId: string; userId: strin
         </p>
       )}
       <p className="text-xs text-neutral-500">
-        O PDF é enviado ao Google Gemini para gerar os cards e é apagado logo a seguir. No plano gratuito, o
-        Google pode usar o conteúdo para melhorar os modelos: evita documentos privados.
+        O conteúdo é enviado ao Google Gemini para gerar os cards e não fica guardado na app. No plano gratuito,
+        o Google pode usar o conteúdo para melhorar os modelos: evita documentos privados.
       </p>
     </form>
-  );
-}
-
-function ReviewDrafts({
-  deckId,
-  drafts,
-  setDrafts,
-  onRestart,
-}: {
-  deckId: string;
-  drafts: Draft[];
-  setDrafts: (d: Draft[]) => void;
-  onRestart: () => void;
-}) {
-  const [error, setError] = useState<string | null>(null);
-  const [saving, startSaving] = useTransition();
-  const selected = drafts.filter((d) => d.keep);
-
-  function update(i: number, patch: Partial<Draft>) {
-    setDrafts(drafts.map((d, j) => (j === i ? { ...d, ...patch } : d)));
-  }
-
-  function save() {
-    setError(null);
-    startSaving(async () => {
-      const result = await saveGeneratedCards(
-        deckId,
-        selected.map(({ front, back }) => ({ front, back })),
-      );
-      if (result?.error) setError(result.error);
-    });
-  }
-
-  return (
-    <div className="flex flex-col gap-4">
-      <div className="flex items-center justify-between gap-3">
-        <p className="text-sm text-neutral-500">
-          {drafts.length} cards gerados · {selected.length} selecionados
-        </p>
-        <button
-          type="button"
-          onClick={() => setDrafts(drafts.map((d) => ({ ...d, keep: selected.length !== drafts.length })))}
-          className="min-h-9 rounded-lg px-2 text-sm text-indigo-600 hover:bg-indigo-50 dark:text-indigo-400 dark:hover:bg-indigo-950"
-        >
-          {selected.length === drafts.length ? "Desmarcar todos" : "Marcar todos"}
-        </button>
-      </div>
-
-      <ul className="flex flex-col gap-3">
-        {drafts.map((d, i) => (
-          <li
-            key={i}
-            className={`flex gap-3 rounded-2xl border bg-white p-3 transition-opacity dark:bg-neutral-900 ${
-              d.keep ? "border-neutral-200 dark:border-neutral-800" : "border-dashed border-neutral-300 opacity-50 dark:border-neutral-700"
-            }`}
-          >
-            <input
-              type="checkbox"
-              checked={d.keep}
-              onChange={(e) => update(i, { keep: e.target.checked })}
-              aria-label={`Incluir card ${i + 1}`}
-              className="mt-2 size-5 shrink-0 accent-indigo-600"
-            />
-            <div className="flex min-w-0 flex-1 flex-col gap-2">
-              <textarea
-                value={d.front}
-                onChange={(e) => update(i, { front: e.target.value })}
-                maxLength={CARD_SIDE_MAX}
-                rows={2}
-                aria-label={`Frente do card ${i + 1}`}
-                className="field-sizing-content resize-none rounded-lg border border-transparent bg-transparent p-1.5 text-base font-medium outline-none focus:border-indigo-400"
-              />
-              <textarea
-                value={d.back}
-                onChange={(e) => update(i, { back: e.target.value })}
-                maxLength={CARD_SIDE_MAX}
-                rows={2}
-                aria-label={`Verso do card ${i + 1}`}
-                className="field-sizing-content resize-none rounded-lg border border-transparent bg-transparent p-1.5 text-sm text-neutral-600 outline-none focus:border-indigo-400 dark:text-neutral-400"
-              />
-            </div>
-          </li>
-        ))}
-      </ul>
-
-      {error && (
-        <p role="alert" className="text-sm text-red-600 dark:text-red-400">
-          {error}
-        </p>
-      )}
-
-      <div className="sticky bottom-0 -mx-4 flex flex-col gap-2 bg-background/95 px-4 pb-[max(1rem,env(safe-area-inset-bottom))] pt-2 backdrop-blur">
-        <Button onClick={save} disabled={saving || selected.length === 0} className="min-h-14 text-base">
-          {saving ? "A guardar…" : `Guardar ${selected.length} ${selected.length === 1 ? "card" : "cards"}`}
-        </Button>
-        <Button variant="ghost" onClick={onRestart} disabled={saving}>
-          Outro PDF
-        </Button>
-      </div>
-    </div>
   );
 }
