@@ -6,12 +6,13 @@ import { GenerateFlow } from "./generate-flow";
 
 export const metadata: Metadata = { title: "Gerar cards · Flashcards" };
 
-// A geração com IA pode demorar; aplica-se às Server Actions desta página.
-export const maxDuration = 60;
+// Descarregar o PDF, enviá-lo ao Gemini e gerar os cards pode demorar;
+// aplica-se às Server Actions desta página.
+export const maxDuration = 120;
 
 export default async function GeneratePage({ params }: PageProps<"/decks/[id]/generate">) {
   const { id } = await params;
-  const { supabase } = await requireUser();
+  const { supabase, userId } = await requireUser();
   const { data: deck } = await supabase.from("decks").select("id, name").eq("id", id).maybeSingle();
   if (!deck) notFound();
 
@@ -24,7 +25,7 @@ export default async function GeneratePage({ params }: PageProps<"/decks/[id]/ge
         <h1 className="text-2xl font-semibold tracking-tight">Gerar cards de um PDF</h1>
         <p className="mt-1 text-neutral-500">A IA lê o documento e sugere cards. Revês tudo antes de guardar.</p>
       </div>
-      <GenerateFlow deckId={deck.id} />
+      <GenerateFlow deckId={deck.id} userId={userId} />
     </div>
   );
 }

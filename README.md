@@ -14,7 +14,7 @@ Este é um projeto de portfólio, pensado primeiro para o celular. Também gera 
 - Histórico de revisões, com o estado do card antes e depois de cada resposta
 - Segurança com Row Level Security: cada utilizador só acede aos próprios dados
 - UI mobile-first, com tema claro/escuro e botões ao alcance do polegar. Dá para instalar no ecrã principal
-- **Cards gerados por IA:** fazes upload de um PDF (até 4 MB) e o Google Gemini sugere até 10, 20 ou 30 cards. Revês, editas ou descartas cada um antes de guardar
+- **Cards gerados por IA:** fazes upload de um PDF (até 15 MB) e o Google Gemini sugere até 10, 20 ou 30 cards. Revês, editas ou descartas cada um antes de guardar
 
 ## Stack
 
@@ -46,7 +46,11 @@ Pré-requisitos: Node.js 20.9 ou superior e um projeto Supabase (o plano gratuit
    - `NEXT_PUBLIC_SUPABASE_ANON_KEY`: a chave *anon* ou *publishable* (`sb_publishable_…`)
    - `GEMINI_API_KEY`: chave do [Google AI Studio](https://aistudio.google.com/apikey). Só é precisa para gerar cards de PDFs. Fica apenas no servidor
    - `GEMINI_MODEL` (opcional): por padrão `gemini-flash-latest`
-3. **Criar as tabelas.** No Supabase, abre **SQL Editor**, cola o conteúdo de [`supabase/migrations/20261001000000_init.sql`](supabase/migrations/20261001000000_init.sql) e corre. Se usares a [Supabase CLI](https://supabase.com/docs/guides/cli), `supabase db push` faz o mesmo.
+3. **Criar as tabelas e o armazenamento.** No Supabase, abre **SQL Editor** e corre, por esta ordem, o conteúdo de:
+   - [`supabase/migrations/20261001000000_init.sql`](supabase/migrations/20261001000000_init.sql): tabelas e RLS
+   - [`supabase/migrations/20261001120000_pdf_storage.sql`](supabase/migrations/20261001120000_pdf_storage.sql): bucket privado `pdfs` para os uploads
+
+   Se usares a [Supabase CLI](https://supabase.com/docs/guides/cli), `supabase db push` faz o mesmo.
 4. **Configurar os URLs de autenticação** (ver abaixo).
 5. **Arrancar**
    ```bash
@@ -87,11 +91,14 @@ Cada push para `main` faz um deploy novo.
 
 ## Geração de cards com IA
 
-- O PDF é enviado diretamente ao Gemini, que também lê tabelas e imagens. Não fica guardado na app nem no Supabase.
+- **Percurso do PDF:**
+  1. O navegador envia-o diretamente para um bucket privado do Supabase Storage (`pdfs/<user_id>/…`). Assim não passa pela Vercel, que limita os pedidos a 4,5 MB.
+  2. O servidor descarrega-o e envia-o à [Files API](https://ai.google.dev/gemini-api/docs/files) do Gemini, que também lê tabelas e imagens.
+  3. No fim, o ficheiro é apagado do Storage e do Gemini, com ou sem erro.
 - A resposta segue um JSON Schema (`{ cards: [{ front, back }] }`) e é validada no servidor antes de chegar ao ecrã.
 - O texto do PDF é tratado como material de estudo: o prompt manda ignorar qualquer instrução que venha dentro do documento.
 - **Plano gratuito:** tem limites de pedidos por minuto e por dia. Quando são atingidos, a app avisa para tentar mais tarde. Nesse plano, o Google pode usar o conteúdo enviado para melhorar os modelos, por isso evita PDFs com dados pessoais.
-- **Limites:** PDF até 4 MB (a Vercel limita os pedidos a 4,5 MB) e até 60 s por geração.
+- **Limites:** PDF até 15 MB (validado no navegador, no bucket e no servidor) e até 120 s por geração.
 - Como a chave é partilhada por todos os utilizadores da instância, numa demo pública a quota gratuita pode esgotar-se.
 
 ## Estrutura

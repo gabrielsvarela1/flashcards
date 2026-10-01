@@ -1,5 +1,5 @@
 import "server-only";
-import { ApiError, GoogleGenAI } from "@google/genai";
+import { ApiError, createPartFromUri, FileState, GoogleGenAI } from "@google/genai";
 import { parseSides, type CardSides } from "@/lib/cards";
 
 const DEFAULT_MODEL = "gemini-flash-latest";
@@ -43,14 +43,24 @@ export async function generateCardsFromPdf(pdf: Uint8Array, count: number): Prom
   const ai = new GoogleGenAI({ apiKey });
 
   let text: string | undefined;
+  let uploadedName: string | undefined;
   try {
+    // Files API: aceita PDFs grandes (o envio inline está limitado a ~20 MB
+    // por pedido, já contando com o base64).
+    const uploaded = await ai.files.upload({
+      file: new Blob([pdf as BlobPart], { type: "application/pdf" }),
+      config: { mimeType: "application/pdf" },
+    });
+    uploadedName = uploaded.name;
+    const file = await waitUntilActive(ai, uploaded);
+
     const response = await ai.models.generateContent({
       model: process.env.GEMINI_MODEL || DEFAULT_MODEL,
       contents: [
         {
           role: "user",
           parts: [
-            { inlineData: { mimeType: "application/pdf", data: Buffer.from(pdf).toString("base64") } },
+            createPartFromUri(file.uri!, "application/pdf"),
             { text: `Cria até ${count} flashcards sobre o conteúdo mais importante deste documento.` },
           ],
         },
@@ -64,6 +74,7 @@ export async function generateCardsFromPdf(pdf: Uint8Array, count: number): Prom
     });
     text = response.text;
   } catch (err) {
+    if (err instanceof GenerationError) throw err;
     console.error("Gemini falhou", err);
     if (err instanceof ApiError) {
       if (err.status === 429) {
@@ -77,6 +88,11 @@ export async function generateCardsFromPdf(pdf: Uint8Array, count: number): Prom
       }
     }
     throw new GenerationError("A IA não respondeu. Tenta novamente.");
+  } finally {
+    // O PDF não fica guardado no Gemini (sem isto, ficaria lá 48 h).
+    if (uploadedName) {
+      await ai.files.delete({ name: uploadedName }).catch((e) => console.error("Falha ao apagar ficheiro no Gemini", e));
+    }
   }
 
   let parsed: unknown;
@@ -96,4 +112,21 @@ export async function generateCardsFromPdf(pdf: Uint8Array, count: number): Prom
     throw new GenerationError("Não foi possível criar cards a partir deste PDF. Tem texto legível?");
   }
   return cards;
+}
+
+type GeminiFile = Awaited<ReturnType<GoogleGenAI["files"]["upload"]>>;
+
+/** PDFs grandes podem ficar uns segundos em PROCESSING antes de se poderem usar. */
+async function waitUntilActive(ai: GoogleGenAI, file: GeminiFile, timeoutMs = 30_000) {
+  const deadline = Date.now() + timeoutMs;
+  let current = file;
+  while (current.state === FileState.PROCESSING) {
+    if (Date.now() > deadline) throw new GenerationError("O PDF está a demorar a ser processado. Tenta novamente.");
+    await new Promise((r) => setTimeout(r, 1500));
+    current = await ai.files.get({ name: current.name! });
+  }
+  if (current.state === FileState.FAILED || !current.uri) {
+    throw new GenerationError("A IA não conseguiu ler este PDF. Experimenta outro ficheiro.");
+  }
+  return current;
 }

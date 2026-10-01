@@ -1,41 +1,73 @@
 "use client";
 
-import { useActionState, useState, useTransition } from "react";
+import { useState, useTransition } from "react";
 import { Button } from "@/components/ui/button";
 import { CARD_SIDE_MAX, type CardSides } from "@/lib/cards";
-import { generateCards, saveGeneratedCards, type GenerateState } from "./actions";
+import { MAX_PDF_BYTES, MAX_PDF_LABEL, PDF_BUCKET } from "@/lib/pdf";
+import { createClient } from "@/lib/supabase/client";
+import { generateCards, saveGeneratedCards } from "./actions";
 
 type Draft = CardSides & { keep: boolean };
 
-export function GenerateFlow({ deckId }: { deckId: string }) {
+export function GenerateFlow({ deckId, userId }: { deckId: string; userId: string }) {
   const [drafts, setDrafts] = useState<Draft[] | null>(null);
-  const [state, action, generating] = useActionState<GenerateState, FormData>(
-    async (prev, formData) => {
-      const result = await generateCards(prev, formData);
+  const [error, setError] = useState<string | null>(null);
+  const [step, setStep] = useState<"idle" | "uploading" | "generating">("idle");
+  const busy = step !== "idle";
+
+  async function onSubmit(e: React.FormEvent<HTMLFormElement>) {
+    e.preventDefault();
+    setError(null);
+    const form = new FormData(e.currentTarget);
+    const file = form.get("pdf");
+    const count = Number(form.get("count"));
+
+    if (!(file instanceof File) || file.size === 0) return setError("Escolhe um ficheiro PDF.");
+    if (file.type && file.type !== "application/pdf") return setError("O ficheiro tem de ser um PDF.");
+    if (file.size > MAX_PDF_BYTES) return setError(`O PDF pode ter no máximo ${MAX_PDF_LABEL}.`);
+
+    try {
+      // Envio direto do browser para o Supabase Storage: não passa pela
+      // Vercel, que limita os pedidos a 4,5 MB.
+      setStep("uploading");
+      const path = `${userId}/${crypto.randomUUID()}.pdf`;
+      const { error: uploadError } = await createClient()
+        .storage.from(PDF_BUCKET)
+        .upload(path, file, { contentType: "application/pdf" });
+      if (uploadError) {
+        setError("Não foi possível enviar o PDF. Verifica a ligação e tenta novamente.");
+        return;
+      }
+
+      setStep("generating");
+      const result = await generateCards(deckId, path, count);
+      if (result.error) setError(result.error);
       if (result.cards) setDrafts(result.cards.map((c) => ({ ...c, keep: true })));
-      return result;
-    },
-    {},
-  );
+    } catch {
+      setError("Algo correu mal. Tenta novamente.");
+    } finally {
+      setStep("idle");
+    }
+  }
 
   if (drafts) {
     return <ReviewDrafts deckId={deckId} drafts={drafts} setDrafts={setDrafts} onRestart={() => setDrafts(null)} />;
   }
 
   return (
-    <form action={action} className="flex flex-col gap-4">
-      <input type="hidden" name="deck_id" value={deckId} />
+    <form onSubmit={onSubmit} className="flex flex-col gap-4">
       <label className="flex cursor-pointer flex-col items-center justify-center gap-2 rounded-2xl border-2 border-dashed border-neutral-300 bg-white p-8 text-center transition-colors hover:border-indigo-400 has-[:focus-visible]:border-indigo-500 dark:border-neutral-700 dark:bg-neutral-900">
         <span className="text-3xl" aria-hidden>
           📄
         </span>
         <span className="font-medium">Escolher PDF</span>
-        <span className="text-sm text-neutral-500">Até 4 MB</span>
+        <span className="text-sm text-neutral-500">Até {MAX_PDF_LABEL}</span>
         <input
           type="file"
           name="pdf"
           accept="application/pdf,.pdf"
           required
+          disabled={busy}
           className="mt-2 w-full max-w-xs text-sm file:mr-3 file:rounded-lg file:border-0 file:bg-indigo-50 file:px-3 file:py-2 file:text-indigo-700 dark:file:bg-indigo-950 dark:file:text-indigo-300"
         />
       </label>
@@ -45,6 +77,7 @@ export function GenerateFlow({ deckId }: { deckId: string }) {
         <select
           name="count"
           defaultValue="20"
+          disabled={busy}
           className="min-h-11 rounded-xl border border-neutral-300 bg-white px-3 text-base dark:border-neutral-700 dark:bg-neutral-900"
         >
           <option value="10">Até 10</option>
@@ -53,22 +86,22 @@ export function GenerateFlow({ deckId }: { deckId: string }) {
         </select>
       </label>
 
-      {state.error && (
+      {error && (
         <p role="alert" className="text-sm text-red-600 dark:text-red-400">
-          {state.error}
+          {error}
         </p>
       )}
 
-      <Button type="submit" disabled={generating} className="min-h-14 text-base">
-        {generating ? "A ler o PDF e a gerar cards…" : "Gerar cards"}
+      <Button type="submit" disabled={busy} className="min-h-14 text-base">
+        {step === "uploading" ? "A enviar o PDF…" : step === "generating" ? "A gerar cards…" : "Gerar cards"}
       </Button>
-      {generating && (
+      {busy && (
         <p className="text-center text-sm text-neutral-500" role="status">
           Pode demorar até um minuto.
         </p>
       )}
       <p className="text-xs text-neutral-500">
-        O PDF é enviado ao Google Gemini para gerar os cards e não fica guardado na app. No plano gratuito, o
+        O PDF é enviado ao Google Gemini para gerar os cards e é apagado logo a seguir. No plano gratuito, o
         Google pode usar o conteúdo para melhorar os modelos: evita documentos privados.
       </p>
     </form>
