@@ -3,6 +3,10 @@ import { ApiError, createPartFromUri, FileState, GoogleGenAI } from "@google/gen
 import { parseSides, type CardSides } from "@/lib/cards";
 
 const DEFAULT_MODEL = "gemini-flash-latest";
+// Usado quando o modelo principal está sobrecarregado (503) ou sem quota
+// (429): no plano gratuito, cada modelo tem a sua própria quota.
+const FALLBACK_MODEL = "gemini-flash-lite-latest";
+const RETRY_DELAYS_MS = [0, 3000];
 
 const SYSTEM_INSTRUCTION = `És um assistente que cria flashcards de estudo a partir de documentos.
 Regras:
@@ -54,8 +58,7 @@ export async function generateCardsFromPdf(pdf: Uint8Array, count: number): Prom
     uploadedName = uploaded.name;
     const file = await waitUntilActive(ai, uploaded);
 
-    const response = await ai.models.generateContent({
-      model: process.env.GEMINI_MODEL || DEFAULT_MODEL,
+    const request = {
       contents: [
         {
           role: "user",
@@ -71,8 +74,8 @@ export async function generateCardsFromPdf(pdf: Uint8Array, count: number): Prom
         responseJsonSchema: RESPONSE_SCHEMA,
         temperature: 0.4,
       },
-    });
-    text = response.text;
+    };
+    text = await generateWithFallback(ai, request);
   } catch (err) {
     if (err instanceof GenerationError) throw err;
     console.error("Gemini falhou", err);
@@ -141,4 +144,37 @@ function describeApiError(err: ApiError) {
     default:
       return "A IA não respondeu. Tenta novamente.";
   }
+}
+
+const isTransient = (err: unknown) =>
+  err instanceof ApiError && (err.status === 429 || err.status === 500 || err.status === 503 || err.status === 504);
+
+/**
+ * Tenta o modelo principal e depois o de reserva, cada um com uma nova
+ * tentativa após uma pausa curta, enquanto o erro for temporário.
+ */
+async function generateWithFallback(
+  ai: GoogleGenAI,
+  request: Omit<Parameters<GoogleGenAI["models"]["generateContent"]>[0], "model">,
+) {
+  const primary = process.env.GEMINI_MODEL || DEFAULT_MODEL;
+  const models = primary === FALLBACK_MODEL ? [primary] : [primary, FALLBACK_MODEL];
+
+  let lastError: unknown;
+  for (const model of models) {
+    for (const delay of RETRY_DELAYS_MS) {
+      if (delay) await new Promise((r) => setTimeout(r, delay));
+      try {
+        const response = await ai.models.generateContent({ ...request, model });
+        return response.text;
+      } catch (err) {
+        lastError = err;
+        if (!isTransient(err)) throw err;
+        console.warn(`Gemini ${model} indisponível (${(err as ApiError).status}), a tentar de novo`);
+        // Sem quota neste modelo: não vale a pena repetir, passa ao seguinte.
+        if ((err as ApiError).status === 429) break;
+      }
+    }
+  }
+  throw lastError;
 }
