@@ -28,9 +28,20 @@ export default async function DecksPage() {
     dueByDeck.set(deck_id, (dueByDeck.get(deck_id) ?? 0) + 1);
   }
 
+  const totalDue = dueCards?.length ?? 0;
+
   return (
     <div className="flex flex-col gap-6">
       <h1 className="text-2xl font-semibold tracking-tight">Os teus decks</h1>
+
+      {totalDue > 0 && (
+        <Link
+          href="/review/all"
+          className="flex min-h-14 items-center justify-center rounded-2xl bg-indigo-600 text-base font-semibold text-white shadow-sm transition-colors hover:bg-indigo-500 active:bg-indigo-700"
+        >
+          Rever tudo · {totalDue} {totalDue === 1 ? "card" : "cards"}
+        </Link>
+      )}
 
       <NewDeckForm />
 

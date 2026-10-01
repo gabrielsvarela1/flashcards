@@ -3,7 +3,7 @@ import Link from "next/link";
 import { notFound } from "next/navigation";
 import { requireUser } from "@/lib/auth";
 import { FSRS_COLUMNS } from "@/lib/fsrs";
-import { ReviewSession, type ReviewCard } from "./review-session";
+import { ReviewSession, type ReviewCard } from "../review-session";
 
 export const metadata: Metadata = { title: "Revisão · Flashcards" };
 
@@ -42,5 +42,12 @@ export default async function ReviewPage({ params }: PageProps<"/review/[deckId]
   }
 
   // key: uma nova sessão (após router.refresh) recomeça do início.
-  return <ReviewSession key={cards.map((c) => c.id).join()} deckId={deck.id} deckName={deck.name} cards={cards} />;
+  return (
+    <ReviewSession
+      key={cards.map((c) => c.id).join()}
+      backHref={`/decks/${deck.id}`}
+      backLabel={deck.name}
+      cards={cards}
+    />
+  );
 }
