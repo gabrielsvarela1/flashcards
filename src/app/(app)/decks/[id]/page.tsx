@@ -12,6 +12,9 @@ export const metadata: Metadata = { title: "Deck · Flashcards" };
 
 type CardListItem = Pick<CardRow, "id" | "front" | "back" | "due" | "state">;
 
+const secondaryLink =
+  "flex min-h-11 items-center justify-center rounded-2xl border border-neutral-200 bg-white text-sm font-medium text-neutral-700 transition-colors hover:border-indigo-300 dark:border-neutral-800 dark:bg-neutral-900 dark:text-neutral-200 dark:hover:border-indigo-700";
+
 export default async function DeckPage({ params }: PageProps<"/decks/[id]">) {
   const { id } = await params;
   const { supabase } = await requireUser();
@@ -53,12 +56,28 @@ export default async function DeckPage({ params }: PageProps<"/decks/[id]">) {
         )
       )}
 
-      <Link
-        href={`/decks/${deck.id}/generate`}
-        className="flex min-h-12 items-center justify-center gap-2 rounded-2xl border border-indigo-200 bg-indigo-50 text-sm font-medium text-indigo-700 transition-colors hover:bg-indigo-100 dark:border-indigo-900 dark:bg-indigo-950 dark:text-indigo-300 dark:hover:bg-indigo-900"
-      >
-        <span aria-hidden>✨</span> Gerar cards de um PDF com IA
-      </Link>
+      <div className="flex flex-col gap-2">
+        <Link
+          href={`/decks/${deck.id}/generate`}
+          className="flex min-h-12 items-center justify-center gap-2 rounded-2xl border border-indigo-200 bg-indigo-50 text-sm font-medium text-indigo-700 transition-colors hover:bg-indigo-100 dark:border-indigo-900 dark:bg-indigo-950 dark:text-indigo-300 dark:hover:bg-indigo-900"
+        >
+          <span aria-hidden>✨</span> Gerar cards com IA
+        </Link>
+        <div className="grid grid-cols-2 gap-2">
+          <Link href={`/decks/${deck.id}/import`} className={secondaryLink}>
+            Importar
+          </Link>
+          {/* Descarrega um ficheiro: não é uma navegação, por isso <a> e não <Link>. */}
+          <a
+            href={`/decks/${deck.id}/export`}
+            download
+            aria-disabled={!cards?.length}
+            className={`${secondaryLink} ${cards?.length ? "" : "pointer-events-none opacity-50"}`}
+          >
+            Exportar CSV
+          </a>
+        </div>
+      </div>
 
       <NewCardForm deckId={deck.id} />
 
