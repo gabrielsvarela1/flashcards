@@ -3,10 +3,14 @@ import { ApiError, createPartFromUri, FileState, GoogleGenAI } from "@google/gen
 import { parseSides, type CardSides } from "@/lib/cards";
 
 const DEFAULT_MODEL = "gemini-flash-latest";
-// Usado quando o modelo principal está sobrecarregado (503) ou sem quota
-// (429): no plano gratuito, cada modelo tem a sua própria quota.
+// Usado quando o modelo principal está sobrecarregado (503), lento ou sem
+// quota (429): no plano gratuito, cada modelo tem a sua própria quota.
 const FALLBACK_MODEL = "gemini-flash-lite-latest";
 const RETRY_DELAYS_MS = [0, 3000];
+// Limite por tentativa. No plano gratuito, os modelos "flash" chegam a demorar
+// mais de um minuto; sem isto, esgotavam os 120 s da página antes da reserva.
+const PRIMARY_TIMEOUT_MS = 25_000;
+const FALLBACK_TIMEOUT_MS = 35_000;
 
 const SYSTEM_INSTRUCTION = `És um assistente que cria flashcards de estudo a partir de documentos.
 Regras:
@@ -80,6 +84,7 @@ export async function generateCardsFromPdf(pdf: Uint8Array, count: number): Prom
     if (err instanceof GenerationError) throw err;
     console.error("Gemini falhou", err);
     if (err instanceof ApiError) throw new GenerationError(`${describeApiError(err)} (erro ${err.status})`);
+    if (isTimeout(err)) throw new GenerationError("A IA está a demorar demasiado. Tenta novamente daqui a pouco.");
     throw new GenerationError("Não foi possível contactar a IA. Tenta novamente.");
   } finally {
     // O PDF não fica guardado no Gemini (sem isto, ficaria lá 48 h).
@@ -146,11 +151,15 @@ function describeApiError(err: ApiError) {
   }
 }
 
+// O SDK aborta o pedido com um AbortError quando passa o httpOptions.timeout.
+const isTimeout = (err: unknown) => (err as { name?: string } | null)?.name === "AbortError";
+
 const isTransient = (err: unknown) =>
-  err instanceof ApiError && (err.status === 429 || err.status === 500 || err.status === 503 || err.status === 504);
+  isTimeout(err) ||
+  (err instanceof ApiError && (err.status === 429 || err.status === 500 || err.status === 503 || err.status === 504));
 
 /**
- * Tenta o modelo principal e depois o de reserva, cada um com uma nova
+ * Tenta o modelo principal uma vez e depois o de reserva, este com uma nova
  * tentativa após uma pausa curta, enquanto o erro for temporário.
  */
 async function generateWithFallback(
@@ -161,18 +170,29 @@ async function generateWithFallback(
   const models = primary === FALLBACK_MODEL ? [primary] : [primary, FALLBACK_MODEL];
 
   let lastError: unknown;
-  for (const model of models) {
-    for (const delay of RETRY_DELAYS_MS) {
+  for (const [i, model] of models.entries()) {
+    // Quando o principal está sobrecarregado, fica assim durante horas:
+    // repetir só gasta tempo que faz falta ao modelo de reserva.
+    const isLast = i === models.length - 1;
+    const delays = isLast ? RETRY_DELAYS_MS : [0];
+    const timeout = isLast ? FALLBACK_TIMEOUT_MS : PRIMARY_TIMEOUT_MS;
+
+    for (const delay of delays) {
       if (delay) await new Promise((r) => setTimeout(r, delay));
       try {
-        const response = await ai.models.generateContent({ ...request, model });
+        const response = await ai.models.generateContent({
+          ...request,
+          model,
+          config: { ...request.config, httpOptions: { timeout } },
+        });
         return response.text;
       } catch (err) {
         lastError = err;
         if (!isTransient(err)) throw err;
-        console.warn(`Gemini ${model} indisponível (${(err as ApiError).status}), a tentar de novo`);
+        const reason = isTimeout(err) ? `sem resposta em ${timeout / 1000} s` : (err as ApiError).status;
+        console.warn(`Gemini ${model} indisponível (${reason}), a tentar de novo`);
         // Sem quota neste modelo: não vale a pena repetir, passa ao seguinte.
-        if ((err as ApiError).status === 429) break;
+        if (err instanceof ApiError && err.status === 429) break;
       }
     }
   }
