@@ -7,8 +7,10 @@ import { getSupabaseEnv } from "./env";
  * Cria-se um por pedido — nunca reutilizar entre pedidos.
  */
 export async function createClient() {
-  const { url, anonKey } = getSupabaseEnv();
+  // cookies() primeiro: marca a rota como dinâmica antes de qualquer erro,
+  // para o build nunca tentar pré-renderizar páginas que dependem da sessão.
   const cookieStore = await cookies();
+  const { url, anonKey } = getSupabaseEnv();
 
   return createServerClient(url, anonKey, {
     cookies: {
