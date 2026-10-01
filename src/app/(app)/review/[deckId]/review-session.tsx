@@ -12,7 +12,7 @@ export type ReviewCard = FsrsFields & { id: string; front: string; back: string 
 
 const gradeStyles = {
   1: "bg-red-600 hover:bg-red-500 active:bg-red-700",
-  2: "bg-amber-500 hover:bg-amber-400 active:bg-amber-600",
+  2: "bg-amber-600 hover:bg-amber-500 active:bg-amber-700",
   3: "bg-emerald-600 hover:bg-emerald-500 active:bg-emerald-700",
   4: "bg-sky-600 hover:bg-sky-500 active:bg-sky-700",
 } as const;
@@ -99,8 +99,10 @@ export function ReviewSession({ deckId, deckName, cards }: { deckId: string; dec
       </div>
 
       <article
-        className="flex min-h-72 flex-1 flex-col rounded-3xl border border-neutral-200 bg-white p-6 shadow-sm dark:border-neutral-800 dark:bg-neutral-900"
+        className={`flex min-h-72 flex-1 flex-col rounded-3xl border border-neutral-200 bg-white p-6 shadow-sm dark:border-neutral-800 dark:bg-neutral-900 ${revealed ? "" : "cursor-pointer"}`}
         aria-live="polite"
+        // Tocar no card também revela a resposta.
+        onClick={() => setRevealed(true)}
       >
         <p className="whitespace-pre-wrap break-words text-xl font-medium leading-relaxed">{card.front}</p>
         {revealed && (
@@ -110,6 +112,9 @@ export function ReviewSession({ deckId, deckName, cards }: { deckId: string; dec
               {card.back}
             </p>
           </>
+        )}
+        {!revealed && (
+          <p className="mt-auto pt-6 text-center text-sm text-neutral-400">Toca para ver a resposta</p>
         )}
       </article>
 
