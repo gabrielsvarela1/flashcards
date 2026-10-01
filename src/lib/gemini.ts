@@ -76,18 +76,8 @@ export async function generateCardsFromPdf(pdf: Uint8Array, count: number): Prom
   } catch (err) {
     if (err instanceof GenerationError) throw err;
     console.error("Gemini falhou", err);
-    if (err instanceof ApiError) {
-      if (err.status === 429) {
-        throw new GenerationError("Limite gratuito da IA atingido. Tenta novamente daqui a uns minutos.");
-      }
-      if (err.status === 400) {
-        throw new GenerationError("A IA não conseguiu ler este PDF. Experimenta outro ficheiro.");
-      }
-      if (err.status === 401 || err.status === 403) {
-        throw new GenerationError("A chave da IA é inválida ou não tem permissão.");
-      }
-    }
-    throw new GenerationError("A IA não respondeu. Tenta novamente.");
+    if (err instanceof ApiError) throw new GenerationError(`${describeApiError(err)} (erro ${err.status})`);
+    throw new GenerationError("Não foi possível contactar a IA. Tenta novamente.");
   } finally {
     // O PDF não fica guardado no Gemini (sem isto, ficaria lá 48 h).
     if (uploadedName) {
@@ -129,4 +119,26 @@ async function waitUntilActive(ai: GoogleGenAI, file: GeminiFile, timeoutMs = 30
     throw new GenerationError("A IA não conseguiu ler este PDF. Experimenta outro ficheiro.");
   }
   return current;
+}
+
+function describeApiError(err: ApiError) {
+  const message = err.message.toLowerCase();
+  if (err.status === 400 && message.includes("api key")) return "A chave da IA é inválida.";
+  switch (err.status) {
+    case 400:
+      return "A IA não conseguiu ler este PDF. Experimenta outro ficheiro.";
+    case 401:
+    case 403:
+      return "A chave da IA é inválida ou não tem permissão.";
+    case 404:
+      return "O modelo de IA configurado não existe ou não está disponível.";
+    case 429:
+      return "Limite gratuito da IA atingido. Tenta novamente daqui a uns minutos.";
+    case 500:
+    case 503:
+    case 504:
+      return "A IA está sobrecarregada neste momento. Tenta novamente daqui a pouco.";
+    default:
+      return "A IA não respondeu. Tenta novamente.";
+  }
 }
