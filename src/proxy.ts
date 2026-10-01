@@ -1,8 +1,8 @@
 import { NextResponse, type NextRequest } from "next/server";
 import { updateSession } from "@/lib/supabase/proxy";
 
-// Rotas acessíveis sem sessão.
-const PUBLIC_PATHS = ["/login", "/auth"];
+// Rotas acessíveis sem sessão. O cron valida o seu próprio segredo.
+const PUBLIC_PATHS = ["/login", "/auth", "/offline", "/api/cron"];
 
 function isPublic(pathname: string) {
   return PUBLIC_PATHS.some((p) => pathname === p || pathname.startsWith(`${p}/`));
@@ -11,6 +11,12 @@ function isPublic(pathname: string) {
 export async function proxy(request: NextRequest) {
   const { response, user } = await updateSession(request);
   const { pathname, search } = request.nextUrl;
+
+  // Quando o destino de um link de email não está nas Redirect URLs, o
+  // Supabase envia o código para o Site URL (a raiz): encaminha-o na mesma.
+  if (pathname === "/" && request.nextUrl.searchParams.has("code")) {
+    return redirectWithCookies(new URL(`/auth/confirm${search}`, request.url), response);
+  }
 
   if (!user && !isPublic(pathname)) {
     const url = new URL("/login", request.url);
@@ -34,7 +40,7 @@ function redirectWithCookies(url: URL, from: NextResponse) {
 
 export const config = {
   matcher: [
-    // Tudo exceto ficheiros estáticos e imagens.
-    "/((?!_next/static|_next/image|manifest.webmanifest|.*\\.(?:svg|png|jpg|jpeg|gif|webp|ico)$).*)",
+    // Tudo exceto ficheiros estáticos, imagens e o service worker.
+    "/((?!_next/static|_next/image|manifest.webmanifest|sw.js|.*\\.(?:svg|png|jpg|jpeg|gif|webp|ico)$).*)",
   ],
 };
