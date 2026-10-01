@@ -2,9 +2,9 @@
 
 Web app de flashcards com **repetição espaçada**. Crias decks e cards, e o algoritmo **FSRS** decide quando deves rever cada card. Assim, o tempo de estudo vai para o que estás prestes a esquecer.
 
-Este é um projeto de portfólio, pensado primeiro para o celular. As próximas fases trazem geração de cards por IA a partir de PDFs.
+Este é um projeto de portfólio, pensado primeiro para o celular. Também gera cards automaticamente a partir de PDFs com IA.
 
-## Funcionalidades (fase 1)
+## Funcionalidades
 
 - Conta com email e palavra-passe (Supabase Auth), com confirmação por email
 - Rotas protegidas: sem sessão, qualquer página redireciona para o login
@@ -14,6 +14,7 @@ Este é um projeto de portfólio, pensado primeiro para o celular. As próximas 
 - Histórico de revisões, com o estado do card antes e depois de cada resposta
 - Segurança com Row Level Security: cada utilizador só acede aos próprios dados
 - UI mobile-first, com tema claro/escuro e botões ao alcance do polegar. Dá para instalar no ecrã principal
+- **Cards gerados por IA:** fazes upload de um PDF (até 4 MB) e o Google Gemini sugere até 10, 20 ou 30 cards. Revês, editas ou descartas cada um antes de guardar
 
 ## Stack
 
@@ -23,6 +24,7 @@ Este é um projeto de portfólio, pensado primeiro para o celular. As próximas 
 | Estilo | [Tailwind CSS 4](https://tailwindcss.com) |
 | Auth e base de dados | [Supabase](https://supabase.com) (Postgres + Auth) via `@supabase/ssr` |
 | Agendamento | [ts-fsrs](https://github.com/open-spaced-repetition/ts-fsrs) (FSRS) |
+| IA | [Google Gemini](https://ai.google.dev) via `@google/genai` (plano gratuito) |
 | Deploy | [Vercel](https://vercel.com) |
 
 ## Correr localmente
@@ -42,6 +44,8 @@ Pré-requisitos: Node.js 20.9 ou superior e um projeto Supabase (o plano gratuit
    Preenche com os valores de **Project Settings → API** (ou do botão **Connect**) no painel do Supabase:
    - `NEXT_PUBLIC_SUPABASE_URL`: o Project URL
    - `NEXT_PUBLIC_SUPABASE_ANON_KEY`: a chave *anon* ou *publishable* (`sb_publishable_…`)
+   - `GEMINI_API_KEY`: chave do [Google AI Studio](https://aistudio.google.com/apikey). Só é precisa para gerar cards de PDFs. Fica apenas no servidor
+   - `GEMINI_MODEL` (opcional): por padrão `gemini-flash-latest`
 3. **Criar as tabelas.** No Supabase, abre **SQL Editor**, cola o conteúdo de [`supabase/migrations/20261001000000_init.sql`](supabase/migrations/20261001000000_init.sql) e corre. Se usares a [Supabase CLI](https://supabase.com/docs/guides/cli), `supabase db push` faz o mesmo.
 4. **Configurar os URLs de autenticação** (ver abaixo).
 5. **Arrancar**
@@ -76,10 +80,19 @@ A rota `/auth/confirm` aceita os dois formatos.
 ## Deploy na Vercel
 
 1. Importa o repositório em **vercel.com → Add New → Project**.
-2. Em **Settings → Environment Variables**, adiciona `NEXT_PUBLIC_SUPABASE_URL` e `NEXT_PUBLIC_SUPABASE_ANON_KEY` (tipo *Config*, ambiente *Production*).
+2. Em **Settings → Environment Variables**, adiciona `NEXT_PUBLIC_SUPABASE_URL` e `NEXT_PUBLIC_SUPABASE_ANON_KEY` (tipo *Config*) e `GEMINI_API_KEY` (tipo *Secret*), todas no ambiente *Production*.
 3. Faz deploy. A seguir, junta o domínio `.vercel.app` ao **Site URL** e às **Redirect URLs** do Supabase.
 
 Cada push para `main` faz um deploy novo.
+
+## Geração de cards com IA
+
+- O PDF é enviado diretamente ao Gemini, que também lê tabelas e imagens. Não fica guardado na app nem no Supabase.
+- A resposta segue um JSON Schema (`{ cards: [{ front, back }] }`) e é validada no servidor antes de chegar ao ecrã.
+- O texto do PDF é tratado como material de estudo: o prompt manda ignorar qualquer instrução que venha dentro do documento.
+- **Plano gratuito:** tem limites de pedidos por minuto e por dia. Quando são atingidos, a app avisa para tentar mais tarde. Nesse plano, o Google pode usar o conteúdo enviado para melhorar os modelos, por isso evita PDFs com dados pessoais.
+- **Limites:** PDF até 4 MB (a Vercel limita os pedidos a 4,5 MB) e até 60 s por geração.
+- Como a chave é partilhada por todos os utilizadores da instância, numa demo pública a quota gratuita pode esgotar-se.
 
 ## Estrutura
 
@@ -91,11 +104,14 @@ src/
 │   └── (app)/                 # Área autenticada (layout com cabeçalho)
 │       ├── decks/             # Lista de decks
 │       ├── decks/[id]/        # Cards de um deck
+│       ├── decks/[id]/generate/ # Gerar cards de um PDF com IA
 │       └── review/[deckId]/   # Sessão de revisão
 ├── components/ui/             # Button, Input, Textarea
 ├── lib/
 │   ├── supabase/              # Clientes browser/servidor e refresh de sessão
 │   ├── fsrs.ts                # Ponte entre a tabela cards e o ts-fsrs
+│   ├── gemini.ts              # PDF → cards com o Gemini
+│   ├── cards.ts               # Validação de frente/verso
 │   └── format.ts              # Intervalos legíveis ("10 min", "4 d")
 ├── types/database.ts
 └── proxy.ts                   # Refresh de sessão + proteção de rotas
@@ -113,7 +129,7 @@ Todas as tabelas têm RLS. O acesso a `cards` e `reviews` é validado pelo dono 
 ## Roadmap
 
 - [x] **Fase 1:** base: autenticação, decks, cards e revisão com FSRS
-- [ ] **Fase 2:** upload de PDF e geração automática de cards por IA
+- [x] **Fase 2:** upload de PDF e geração automática de cards por IA
 - [ ] **Fase 3:** respostas abertas corrigidas por IA
 
 ## Scripts
