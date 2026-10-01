@@ -2,25 +2,18 @@
 
 import { revalidatePath } from "next/cache";
 import { requireUser } from "@/lib/auth";
+import { parseSides } from "@/lib/cards";
 
 export type CardFormState = { error?: string; ok?: boolean };
 
-const MAX = 2000;
-
 function readSides(formData: FormData) {
-  const front = String(formData.get("front") ?? "").trim();
-  const back = String(formData.get("back") ?? "").trim();
-  if (!front || !back) return { error: "Preenche a frente e o verso." };
-  if (front.length > MAX || back.length > MAX) {
-    return { error: `Cada lado pode ter no máximo ${MAX} caracteres.` };
-  }
-  return { front, back };
+  return parseSides(formData.get("front"), formData.get("back"));
 }
 
 export async function createCard(_prev: CardFormState, formData: FormData): Promise<CardFormState> {
   const deckId = String(formData.get("deck_id") ?? "");
   const sides = readSides(formData);
-  if (!sides.front) return { error: sides.error };
+  if ("error" in sides) return { error: sides.error };
 
   const { supabase } = await requireUser();
   // Os campos FSRS usam os defaults da tabela (card novo, due = agora).
@@ -37,7 +30,7 @@ export async function updateCard(_prev: CardFormState, formData: FormData): Prom
   const id = String(formData.get("id") ?? "");
   const deckId = String(formData.get("deck_id") ?? "");
   const sides = readSides(formData);
-  if (!sides.front) return { error: sides.error };
+  if ("error" in sides) return { error: sides.error };
 
   const { supabase } = await requireUser();
   const { data, error } = await supabase

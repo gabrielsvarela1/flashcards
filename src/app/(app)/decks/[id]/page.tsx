@@ -53,6 +53,13 @@ export default async function DeckPage({ params }: PageProps<"/decks/[id]">) {
         )
       )}
 
+      <Link
+        href={`/decks/${deck.id}/generate`}
+        className="flex min-h-12 items-center justify-center gap-2 rounded-2xl border border-indigo-200 bg-indigo-50 text-sm font-medium text-indigo-700 transition-colors hover:bg-indigo-100 dark:border-indigo-900 dark:bg-indigo-950 dark:text-indigo-300 dark:hover:bg-indigo-900"
+      >
+        <span aria-hidden>✨</span> Gerar cards de um PDF com IA
+      </Link>
+
       <NewCardForm deckId={deck.id} />
 
       <section className="flex flex-col gap-3">
